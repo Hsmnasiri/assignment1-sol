@@ -1,0 +1,110 @@
+name: build-test-and-score
+on: [push, pull_request]
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ci:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        build_type: [Release]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout student repo
+        uses: actions/checkout@v4
+
+      - uses: jwlawson/actions-setup-cmake@v2
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }}
+
+      # ---------- Visible tests (build + Part A) ----------
+      - name: Run ctest (visible tests)
+        id: ctest_visible
+        continue-on-error: true
+        run: |
+          ctest --test-dir build --output-on-failure --no-tests=error \
+            --output-junit "${{ github.workspace }}/junit-visible-${{ runner.os }}.xml"
+
+      # ---------- Hidden tests (fetched from private repo) ----------
+      - name: Checkout hidden tests
+        uses: actions/checkout@v4
+        with:
+          repository: Student-Work-CSI2372/a1-hidden-tests
+          token: ${{ secrets.INSTRUCTOR_TOKEN }}
+          path: hidden_tests
+
+      - name: Build & run hidden tests
+        id: ctest_hidden
+        continue-on-error: true
+        run: |
+          cmake -S hidden_tests -B hidden_build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          cmake --build hidden_build --config ${{ matrix.build_type }}
+          ctest --test-dir hidden_build --output-on-failure --no-tests=error \
+            --output-junit "${{ github.workspace }}/junit-hidden-${{ runner.os }}.xml"
+
+      # ---------- Score + Summary ----------
+      - name: Score and summarize
+        if: always()
+        shell: bash
+        run: |
+          python - << 'PY'
+          import os, glob, xml.etree.ElementTree as ET
+
+          points = {
+            "Build_compile_only": 1.0,
+            "PartA_scope_probe": 0.5,
+            "PartB_raii": 2.0,
+            "PartC_copy_move": 3.0,
+            "PartD_error_handling": 2.5,
+          }
+
+          # De-duplicate any overlapping globs
+          paths = glob.glob("junit-*.xml") + glob.glob("**/junit-*.xml", recursive=True)
+          files = []
+          seen = set()
+          for p in paths:
+              if p not in seen:
+                  seen.add(p)
+                  files.append(p)
+
+          print("JUnit files found:", files)
+
+          earned = 0.0
+          details = []
+
+          def tagname(e): return e.tag.split('}')[-1]  # strip any XML namespace
+
+          for fn in files:
+              try:
+                  root = ET.parse(fn).getroot()
+              except Exception as e:
+                  print("Parse error:", fn, e); continue
+
+              for tc in list(root.iter("testcase")) + list(root.iter("TestCase")):
+                  name = tc.attrib.get("name") or tc.attrib.get("Name") or ""
+                  child_tags = {tagname(c).lower() for c in tc}
+                  ok = not ({"failure","error"} & child_tags)
+                  if name in points:
+                      earned += points[name] if ok else 0.0
+                      details.append(f"{name}: {'PASS' if ok else 'FAIL'} ({points[name]:.1f} pts)")
+
+          total = sum(points.values())
+          print("==== Autograder Summary ====")
+          for d in details: print(d)
+          print(f"Score: {earned:.1f} / {total:.1f} (OS: {os.environ.get('RUNNER_OS')})")
+
+          with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a") as f:
+              f.write(f"""### Autograder Summary ({os.environ.get('RUNNER_OS')})
+          {os.linesep.join('- ' + d for d in details)}
+          **Score: {earned:.1f} / {total:.1f}**
+          """)
+          PY
