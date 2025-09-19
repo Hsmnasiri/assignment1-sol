@@ -1,3 +1,4 @@
 #include "scope_probe.hpp"
 #include <iostream>
-// TODO Part A: implement
+ScopeProbe::ScopeProbe(std::string n) : name(std::move(n)) { std::cout << "Enter: " << name << "\n"; }
+ScopeProbe::~ScopeProbe() { std::cout << "Exit: " << name << "\n"; }
